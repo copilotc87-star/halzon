@@ -1,0 +1,8 @@
+# ?éŸê  ©¢©??ìŸ
+
+??Ÿê?©«Ÿë ™êíª¬?  Ÿ ?¢? ?©íì? ™ªêíë? åŸ?é í ¢ é?äŸ¢.
+
+## Ÿ¤©Ÿ
+
+pip install flask flask-socketio werkzeug
+python app.py
