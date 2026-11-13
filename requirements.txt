@@ -1,0 +1,5 @@
+flask
+flask-socketio
+werkzeug
+gunicorn==23.0.0
+eventlet==0.33.3

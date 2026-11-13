@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-کلام برتری‌ها v5.0 — پیام‌رسان + کلاس + آزمون + فایل + گروه + پشتیبانی + تبلیغات
+Halzon v5.0 — پیام‌رسان + کلاس + آزمون + فایل + گروه + پشتیبانی + تبلیغات + مدیریت ورود
 """
 
 import os
@@ -14,24 +14,25 @@ from flask_socketio import SocketIO, join_room
 from werkzeug.security import generate_password_hash, check_password_hash
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-UPLOAD_DIR = os.path.join(BASE_DIR, 'uploads')
-SITE_DIR = os.path.join(BASE_DIR, 'sites')
-ADS_DIR = os.path.join(BASE_DIR, 'ads')
+# تغییر مسیرها به /data برای دائمی شدن روی Fly.io
+UPLOAD_DIR = '/data/uploads'
+SITE_DIR = '/data/sites'
+ADS_DIR = '/data/ads'
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(SITE_DIR, exist_ok=True)
 os.makedirs(ADS_DIR, exist_ok=True)
 
 app = Flask(__name__)
-app.secret_key = "kalam-bartariha-secret-2024"
+app.secret_key = "halzon-secret-2024"
 app.config['UPLOAD_FOLDER'] = UPLOAD_DIR
 app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024
 
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
-DB = os.path.join(BASE_DIR, 'chat.db')
+DB = '/data/chat.db'
 ADMIN_USER = "admin"
 ADMIN_PASS = "1234"
-SITE_NAME = "کلام برتری‌ها"
+SITE_NAME = "کلام برتري ها"
 
 def init_db():
     conn = sqlite3.connect(DB)
@@ -168,25 +169,25 @@ def api_register():
     pw = (d.get('password') or '').strip()
     if not all([fn, ln, ph, pw]):
         return jsonify(ok=False, msg='همه فیلدها را پر کنید'), 400
-    if len(pw) < 4:
-        return jsonify(ok=False, msg='رمز حداقل ۴ کاراکتر'), 400
+    
     conn = db()
     ex = conn.execute("SELECT * FROM users WHERE phone=?", (ph,)).fetchone()
-    if ex:
-        if not check_password_hash(ex['password'], pw):
-            conn.close()
-            return jsonify(ok=False, msg='رمز اشتباه'), 401
-        uid = ex['id']
-        conn.execute("UPDATE users SET is_online=1, last_seen=? WHERE id=?", (now(), uid))
-    else:
-        cur = conn.execute(
-            "INSERT INTO users (first_name,last_name,phone,password,avatar_color,is_online,last_seen) VALUES (?,?,?,?,?,1,?)",
-            (fn, ln, ph, generate_password_hash(pw), pick_color(ph), now()))
-        conn.commit()
-        uid = cur.lastrowid
-    conn.commit(); conn.close()
+    
+    # سیستم قفل ورود: فقط کسانی که ادمین از قبل ساخته می‌تونن وارد بشن
+    if not ex:
+        conn.close()
+        return jsonify(ok=False, msg='شما مجاز به ورود نیستید. با ادمین تماس بگیرید.'), 401
+        
+    if not check_password_hash(ex['password'], pw):
+        conn.close()
+        return jsonify(ok=False, msg='رمز اشتباه است'), 401
+        
+    uid = ex['id']
+    conn.execute("UPDATE users SET is_online=1, last_seen=? WHERE id=?", (now(), uid))
+    conn.commit()
+    conn.close()
     session['user_id'] = uid
-    session['name'] = f"{fn} {ln}"
+    session['name'] = f"{ex['first_name']} {ex['last_name']}"
     return jsonify(ok=True, user_id=uid, name=session['name'])
 
 @app.route('/api/logout', methods=['POST'])
@@ -668,6 +669,47 @@ def admin_logout():
 def admin_check():
     return jsonify(ok=is_admin())
 
+# -- مدیریت دانش‌آموزان (جدید) --
+@app.route('/api/admin/students', methods=['GET', 'POST'])
+def admin_students():
+    if not is_admin(): return jsonify(ok=False), 403
+    conn = db()
+    if request.method == 'POST':
+        d = request.json or {}
+        fn = (d.get('first_name') or '').strip()
+        ln = (d.get('last_name') or '').strip()
+        ph = (d.get('phone') or '').strip()
+        pw = (d.get('password') or '').strip()
+        if not all([fn, ln, ph, pw]):
+            conn.close(); return jsonify(ok=False, msg='همه فیلدها الزامی است'), 400
+        
+        ex = conn.execute("SELECT id FROM users WHERE phone=?", (ph,)).fetchone()
+        if ex:
+            conn.execute("UPDATE users SET first_name=?, last_name=?, password=? WHERE id=?",
+                         (fn, ln, generate_password_hash(pw), ex['id']))
+        else:
+            conn.execute("INSERT INTO users (first_name,last_name,phone,password,avatar_color) VALUES (?,?,?,?,?)",
+                         (fn, ln, ph, generate_password_hash(pw), pick_color(ph)))
+        conn.commit(); conn.close()
+        return jsonify(ok=True)
+    
+    rows = conn.execute("SELECT id,first_name,last_name,phone,is_online FROM users ORDER BY id DESC").fetchall()
+    conn.close()
+    return jsonify([dict(r) for r in rows])
+
+@app.route('/api/admin/students/<int:uid>', methods=['DELETE'])
+def admin_del_student(uid):
+    if not is_admin(): return jsonify(ok=False), 403
+    conn = db()
+    conn.execute("DELETE FROM messages WHERE sender_id=? OR receiver_id=?", (uid, uid))
+    conn.execute("DELETE FROM group_messages WHERE sender_id=?", (uid,))
+    conn.execute("DELETE FROM answers WHERE attempt_id IN (SELECT id FROM exam_attempts WHERE user_id=?)", (uid,))
+    conn.execute("DELETE FROM exam_attempts WHERE user_id=?", (uid,))
+    conn.execute("DELETE FROM users WHERE id=?", (uid,))
+    conn.commit(); conn.close()
+    return jsonify(ok=True)
+
+# -- بقیه بخش‌های ادمین --
 @app.route('/api/admin/classes', methods=['POST'])
 def admin_add_class():
     if not is_admin(): return jsonify(ok=False), 403
@@ -718,7 +760,7 @@ def admin_del_video(vid):
 def admin_users():
     if not is_admin(): return jsonify(ok=False), 403
     conn = db()
-    rows = conn.execute("""SELECT id,first_name,last_name,phone,password,is_online,last_seen,
+    rows = conn.execute("""SELECT id,first_name,last_name,phone,is_online,last_seen,
                                   avatar_color,created_at FROM users ORDER BY id DESC""").fetchall()
     conn.close()
     return jsonify([dict(r) for r in rows])
@@ -921,7 +963,9 @@ def on_connect():
         join_room(f"group_{g['id']}")
     conn.close()
 
-# ═══════════ CSS ═══════════
+# ============================================================
+#                       CSS & HTML & JS
+# ============================================================
 CSS = r"""
 @import url('https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;500;600;700;800&display=swap');
 :root{--bg-primary:#fff;--bg-secondary:#f4f4f5;--bg-tertiary:#e4e4e7;--text-primary:#18181b;--text-secondary:#71717a;--text-muted:#a1a1aa;--accent:#6366f1;--accent-hover:#4f46e5;--accent-soft:#eef2ff;--success:#10b981;--danger:#ef4444;--warning:#f59e0b;--border:#e4e4e7;--chat-bg:#efeae2;--msg-out:#d9fdd3;--msg-in:#fff;--radius:12px;--radius-lg:20px;}
@@ -1078,7 +1122,6 @@ textarea.form-input{min-height:80px;resize:vertical}
 .status-badge{padding:3px 10px;border-radius:20px;font-size:11px;font-weight:600;background:var(--bg-tertiary);color:var(--text-secondary)}
 .status-badge.online{background:rgba(16,185,129,.15);color:var(--success)}
 .status-badge.support{background:rgba(245,179,53,.2);color:#9a5b00}
-/* ───── تبلیغات ───── */
 .ads-banner-container{background:var(--bg-primary);border-bottom:1px solid var(--border);padding:10px 16px;position:relative;overflow:hidden}
 .ads-banner-inner{position:relative;border-radius:14px;overflow:hidden;cursor:pointer;transition:transform .2s}
 .ads-banner-inner:hover{transform:scale(1.005)}
@@ -1139,7 +1182,7 @@ LOGIN_HTML = r"""<!DOCTYPE html>
 <div class="auth-field"><input id="ln" placeholder="نام خانوادگی"></div>
 <div class="auth-field"><input id="ph" placeholder="شماره موبایل" inputmode="numeric"></div>
 <div class="auth-field"><input id="pw" type="password" placeholder="رمز عبور"></div>
-<button class="auth-btn" onclick="doLogin()">ورود / ثبت‌نام</button>
+<button class="auth-btn" onclick="doLogin()">ورود به سایت</button>
 <p class="auth-msg" id="msg"></p>
 <a href="/admin" class="auth-link">🔐 ورود ادمین</a>
 </div></div>
@@ -1154,10 +1197,10 @@ async function doLogin(){
     const r=await fetch('/api/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     const txt=await r.text();
     let d;
-    try{d=JSON.parse(txt);}catch(e){m.textContent='خطای سرور: '+txt.slice(0,200);btn.disabled=false;btn.textContent='ورود / ثبت‌نام';return;}
+    try{d=JSON.parse(txt);}catch(e){m.textContent='خطای سرور: '+txt.slice(0,200);btn.disabled=false;btn.textContent='ورود به سایت';return;}
     if(d.ok)location.href='/';
-    else{m.textContent=d.msg||'خطا';btn.disabled=false;btn.textContent='ورود / ثبت‌نام';}
-  }catch(e){m.textContent='خطای شبکه: '+e.message;btn.disabled=false;btn.textContent='ورود / ثبت‌نام';}
+    else{m.textContent=d.msg||'خطا';btn.disabled=false;btn.textContent='ورود به سایت';}
+  }catch(e){m.textContent='خطای شبکه: '+e.message;btn.disabled=false;btn.textContent='ورود به سایت';}
 }
 [fn,ln,ph,pw].forEach(i=>i.addEventListener('keydown',e=>{if(e.key==='Enter')doLogin();}));
 </script>
@@ -1247,6 +1290,7 @@ ADMIN_HTML = r"""<!DOCTYPE html>
 <aside class="admin-sidebar">
 <div class="sidebar-logo" style="margin-bottom:24px;padding:0 8px"><div class="logo-icon">📚</div><span>__SITE__</span></div>
 <div class="admin-nav-item active" onclick="adminTab('dashboard',this)"><span>📊</span> داشبورد</div>
+<div class="admin-nav-item" onclick="adminTab('students',this)"><span>👤</span> مدیریت دانش‌آموزان</div>
 <div class="admin-nav-item" onclick="adminTab('classes',this)"><span>🎓</span> کلاس‌ها</div>
 <div class="admin-nav-item" onclick="adminTab('videos',this)"><span>🎬</span> ویدیوها</div>
 <div class="admin-nav-item" onclick="adminTab('exams',this)"><span>📝</span> آزمون‌ها</div>
@@ -1318,7 +1362,6 @@ function avatarHTML(name,color,size='',online=null){
   return `<div class="avatar ${size}" style="background:${color||'#6366f1'}">${ini}${dot}</div>`;
 }
 
-// ═══════════ تبلیغات ═══════════
 async function loadAds(){
   try {
     const r = await fetch('/api/ads');
@@ -1374,7 +1417,6 @@ window.showAdsPage = () => {
   if(!adsCache.length){ toast('هنوز تبلیغی نیست'); return; }
   showPage(`<div class="page-card fade-in">
     <h2>📢 تبلیغات</h2>
-    <p style="color:var(--text-secondary);font-size:13px;margin-bottom:12px">آگهی‌های فعال</p>
     <div class="ads-grid">
       ${adsCache.map(a=>`<div class="ad-card">
         <img src="/ads/${esc(a.image_filename)}" alt="${esc(a.title)}">
@@ -1513,7 +1555,6 @@ window.renderSidebar = () => {
   box.innerHTML = html;
 };
 
-// ═══════════ چت خصوصی ═══════════
 window.openChat = async (uid) => {
   currentChatWith = uid;
   currentGroupId = null;
@@ -1579,7 +1620,6 @@ function onMessage(m){
   }
 }
 
-// ═══════════ گروه ═══════════
 window.openGroup = async (gid) => {
   currentGroupId = gid;
   currentChatWith = null;
@@ -1640,7 +1680,6 @@ function onGroupMessage(m){
   }
 }
 
-// ═══════════ ارسال ═══════════
 window.sendText = async () => {
   const input = document.getElementById('msgInput');
   const text = input.value.trim();
@@ -1718,7 +1757,6 @@ window.sendMedia = async (inp) => {
   inp.value = '';
 };
 
-// ═══════════ صفحات ═══════════
 function showPage(html){
   document.getElementById('emptyState').classList.add('hidden');
   document.getElementById('chatView').classList.add('hidden');
@@ -1777,7 +1815,6 @@ window.openFile = (fid) => {
   </div>`);
 };
 
-// ═══════════ ماشین‌حساب ═══════════
 window.openCalc = () => {
   showPage(`<div class="page-card fade-in" style="max-width:450px">
     <h2>🧮 ماشین‌حساب علمی</h2>
@@ -1836,7 +1873,6 @@ window.calcEq = () => {
   } catch(e) { toast('خطا در محاسبه'); calcExpr = '0'; renderCalc(); }
 };
 
-// ═══════════ آزمون ═══════════
 window.openExam = async (eid) => {
   const e = sidebarData.exams.find(x=>x.id === eid);
   if(!e) return;
@@ -1976,10 +2012,11 @@ window.adminTab = (tab, el) => {
 };
 
 function loadTab(tab){
-  const titles = {dashboard:'داشبورد',classes:'کلاس‌ها',videos:'ویدیوها',exams:'آزمون‌ها',ads:'تبلیغات',users:'کاربران',groups:'گروه‌ها',chats:'چت‌های خصوصی',group_chats:'چت گروهی',files:'فایل‌ها'};
+  const titles = {dashboard:'داشبورد',students:'مدیریت دانش‌آموزان',classes:'کلاس‌ها',videos:'ویدیوها',exams:'آزمون‌ها',ads:'تبلیغات',users:'کاربران',groups:'گروه‌ها',chats:'چت‌های خصوصی',group_chats:'چت گروهی',files:'فایل‌ها'};
   document.getElementById('adminTitle').textContent = titles[tab];
   document.getElementById('adminContent').innerHTML = '<p style="color:var(--text-muted)">بارگذاری...</p>';
   if(tab === 'dashboard') renderDashboard();
+  else if(tab === 'students') renderStudents();
   else if(tab === 'classes') renderClasses();
   else if(tab === 'videos') renderVideos();
   else if(tab === 'exams') renderExams();
@@ -2025,18 +2062,64 @@ async function renderDashboard(){
     </div>`;
 }
 
-// ═══════════ تبلیغات ادمین ═══════════
+// ═══════════ دانش‌آموزان ═══════════
+async function renderStudents(){
+  const data = await fetch('/api/admin/students').then(r=>r.json());
+  document.getElementById('adminContent').innerHTML = `
+    <div class="admin-card">
+      <h3 style="margin-bottom:12px">➕ افزودن / ویرایش دانش‌آموز</h3>
+      <p style="color:var(--text-secondary);font-size:13px;margin-bottom:12px">
+        فقط دانش‌آموزانی که اینجا تعریف می‌کنید می‌توانند وارد سایت شوند.
+      </p>
+      <input class="form-input" id="sFn" placeholder="نام">
+      <input class="form-input" id="sLn" placeholder="نام خانوادگی">
+      <input class="form-input" id="sPh" placeholder="شماره موبایل (نام کاربری)">
+      <input class="form-input" id="sPw" type="text" placeholder="رمز عبور">
+      <button class="btn btn-primary" onclick="saveStudent()">ذخیره دانش‌آموز</button>
+    </div>
+    <div class="admin-card">
+      <h3 style="margin-bottom:12px">📋 لیست دانش‌آموزان (${data.length})</h3>
+      ${data.map(u=>`<div class="user-item">
+        <div class="avatar" style="background:#6366f1">${(u.first_name[0]||'')+(u.last_name[0]||'')}</div>
+        <div class="user-info">
+          <div class="user-name">${esc(u.first_name)} ${esc(u.last_name)}</div>
+          <div class="user-phone">📱 ${esc(u.phone)}</div>
+        </div>
+        <span class="status-badge ${u.is_online?'online':''}">${u.is_online?'آنلاین':'آفلاین'}</span>
+        <button class="btn btn-danger btn-sm" onclick="delStudent(${u.id})">حذف</button>
+      </div>`).join('')||'<p style="color:var(--text-muted)">دانش‌آموزی تعریف نشده</p>'}
+    </div>`;
+}
+window.saveStudent = async () => {
+  const fn = document.getElementById('sFn').value.trim();
+  const ln = document.getElementById('sLn').value.trim();
+  const ph = document.getElementById('sPh').value.trim();
+  const pw = document.getElementById('sPw').value.trim();
+  if(!fn || !ln || !ph || !pw) return toast('همه فیلدها الزامی است');
+  const r = await fetch('/api/admin/students', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({first_name: fn, last_name: ln, phone: ph, password: pw})
+  });
+  const d = await r.json();
+  if(d.ok){toast('✅ ذخیره شد'); renderStudents();}
+  else toast(d.msg || 'خطا');
+};
+window.delStudent = async (id) => {
+  if(!confirm('دانش‌آموز و تمام پیام‌هایش حذف شود؟')) return;
+  await fetch(`/api/admin/students/${id}`, {method: 'DELETE'});
+  toast('حذف شد');
+  renderStudents();
+};
+
+// ═══════════ تبلیغات ═══════════
 async function renderAds(){
   const data = await fetch('/api/admin/ads').then(r=>r.json());
   document.getElementById('adminContent').innerHTML = `
     <div class="admin-card">
       <h3 style="margin-bottom:12px">📢 آپلود تبلیغ جدید</h3>
-      <p style="color:var(--text-secondary);font-size:13px;margin-bottom:12px">
-        عکس تبلیغ رو انتخاب کن (jpg/png/gif/webp). می‌تونی عنوان، توضیح و لینک هم اضافه کنی.
-      </p>
       <input class="form-input" id="adTitle" placeholder="عنوان تبلیغ (اختیاری)">
       <textarea class="form-input" id="adDesc" placeholder="توضیحات (اختیاری)"></textarea>
-      <input class="form-input" id="adLink" placeholder="لینک (اختیاری - مثلاً https://example.com)">
+      <input class="form-input" id="adLink" placeholder="لینک (اختیاری)">
       <input class="form-input" type="file" id="adImage" accept="image/*">
       <button class="btn btn-primary" onclick="uploadAd()">⬆️ آپلود تبلیغ</button>
       <p id="adUpStatus" style="margin-top:10px;color:var(--accent)"></p>
@@ -2296,8 +2379,7 @@ async function renderUsers(){
     ${data.map(u=>`<div class="user-item">
       <div class="avatar" style="background:${u.avatar_color}">${(u.first_name[0]||'')+(u.last_name[0]||'')}</div>
       <div class="user-info"><div class="user-name">${esc(u.first_name)} ${esc(u.last_name)}</div>
-      <div class="user-phone">📱 ${esc(u.phone)}</div>
-      <div class="user-pass">🔑 ${esc(u.password)}</div></div>
+      <div class="user-phone">📱 ${esc(u.phone)}</div></div>
       <span class="status-badge ${u.is_online?'online':''}">${u.is_online?'آنلاین':'آفلاین'}</span></div>`).join('')||'<p style="color:var(--text-muted)">کاربری نیست</p>'}</div>`;
 }
 
@@ -2395,7 +2477,7 @@ def route_admin():
 # ═══════════ اجرا ═══════════
 if __name__ == '__main__':
     print("=" * 50)
-    print("  کلام برتری‌ها v5.0 آماده است")
+    print("  Halzon v5.0 آماده است")
     print("=" * 50)
     print("  http://localhost:5000/login")
     print("  http://localhost:5000/admin  (admin/1234)")
